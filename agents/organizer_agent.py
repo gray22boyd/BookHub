@@ -1,5 +1,3 @@
-from ftplib import print_line
-
 import requests
 import textwrap
 import re
