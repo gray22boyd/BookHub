@@ -1,5 +1,24 @@
 import streamlit as st
+import os
 from lead_agent.lead_agent import LeadAgent
+
+# Function to get available books with valid FAISS indexes
+def get_available_books():
+    books = []
+    # Check if faiss_indexes directory exists
+    if not os.path.exists("faiss_indexes"):
+        return books
+    
+    # Look for directories that contain both index.faiss and index.pkl files
+    for folder in os.listdir("faiss_indexes"):
+        folder_path = os.path.join("faiss_indexes", folder)
+        if os.path.isdir(folder_path):
+            if (os.path.exists(os.path.join(folder_path, "index.faiss")) and 
+                os.path.exists(os.path.join(folder_path, "index.pkl"))):
+                # Convert folder name back to book title format (replace underscores with spaces and capitalize)
+                book_title = " ".join(word.capitalize() for word in folder.split("_"))
+                books.append(book_title)
+    return books
 
 # Initialize the LeadAgent
 lead_agent = LeadAgent()
@@ -70,6 +89,9 @@ st.markdown("""
 # Title
 st.markdown("<h1 style='text-align: center;'>📚 BookHub – AI Book Companion</h1>", unsafe_allow_html=True)
 
+# Get available books
+available_books = get_available_books()
+
 # Initialize session state for message history
 if 'messages' not in st.session_state:
     st.session_state['messages'] = []
@@ -87,19 +109,27 @@ with chat_container:
 
 # Create a form for user input with Send button
 with st.form(key='chat_form', clear_on_submit=True):
+    # Book selection dropdown
+    if available_books:
+        selected_book = st.selectbox("Select a book:", available_books)
+        placeholder_text = "Ask anything about this book..."
+    else:
+        selected_book = None
+        placeholder_text = "No books available with FAISS indexes. Please add a book first."
+    
     col1, col2 = st.columns([4, 1])
     with col1:
-        user_input = st.text_input("Your message", placeholder="Ask anything about a book…", label_visibility="collapsed")
+        user_input = st.text_input("Your message", placeholder=placeholder_text, label_visibility="collapsed", disabled=not available_books)
     with col2:
-        submit_button = st.form_submit_button("Send")
+        submit_button = st.form_submit_button("Send", disabled=not available_books)
 
 # Handle user input
-if submit_button and user_input:
+if submit_button and user_input and selected_book:
     # Add user message to session state
     st.session_state['messages'].append({'type': 'user', 'content': user_input})
 
-    # Get response from LeadAgent
-    response = lead_agent.handle_prompt(user_input)
+    # Get response from LeadAgent's route method
+    response = lead_agent.route(user_input, selected_book)
 
     # Add AI response to session state
     st.session_state['messages'].append({'type': 'bot', 'content': response})
