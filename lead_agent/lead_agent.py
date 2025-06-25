@@ -1,101 +1,70 @@
-import os
-import openai
-from dotenv import load_dotenv
+﻿from typing import Optional
+from config.settings import config
 from agents.answer_agent import AnswerAgent
-
-# Try to import OrganizerAgent, but handle failure gracefully
-try:
-    from agents.organizer_agent import OrganizerAgent
-    organizer_available = True
-except ImportError:
-    print("⚠️ OrganizerAgent is not available yet.")
-    organizer_available = False
-
-# Load environment variables and set OpenAI API key
-load_dotenv()
-openai_api_key = os.getenv("OPENAI_API_KEY")
-if not openai_api_key:
-    print("⚠️ OpenAI key not loaded from .env file")
-
-# Set the OpenAI API key
-openai.api_key = openai_api_key
+from agents.organizer_agent import OrganizingAgent
 
 class LeadAgent:
+    """
+    Main routing agent that directs user queries to appropriate specialized agents.
+    Simplified to handle only book Q&A and book organization tasks.
+    """
+    
     def __init__(self):
-        # Initialize organizer_agent only if the import was successful
-        if organizer_available:
-            self.organizer_agent = OrganizerAgent()
-        else:
+        """Initialize the lead agent with organizer agent."""
+        try:
+            self.organizer_agent = OrganizingAgent()
+        except Exception as e:
+            print(f" Warning: OrganizingAgent initialization failed: {e}")
             self.organizer_agent = None
-            
-        # Verify API key on initialization
-        if not openai_api_key:
-            print("⚠️ WARNING: OpenAI API key not found in environment variables")
 
     def classify_prompt(self, prompt: str) -> str:
-        if any(keyword in prompt.lower() for keyword in ["summarize", "analyze", "explain"]):
-            return "answer"
-        elif any(keyword in prompt.lower() for keyword in ["add", "upload", "ingest"]):
+        """
+        Classify user prompts into two categories:
+        - 'organize': For adding/uploading/ingesting books
+        - 'answer': For all book-related questions (default)
+        """
+        if any(keyword in prompt.lower() for keyword in ["add", "upload", "ingest"]):
             return "organize"
         else:
-            return "general"
-            
-    def route(self, prompt: str, book_title: str) -> str:
-        classification = self.classify_prompt(prompt)
-        if classification == "answer":
-            answer_agent = AnswerAgent(book_title)
-            return answer_agent.answer(prompt)
-        elif classification == "organize":
-            if self.organizer_agent is None:
-                return "Organizer agent is not ready yet."
-            return self.organizer_agent.handle(prompt)
-        elif classification == "general":
-            if not openai_api_key:
-                return "⚠️ OpenAI API key is missing or invalid. Please check your .env file and restart the application."
-            return self.general_chat_response(prompt)
-        else:
-            return "I'm not sure how to process that request."
+            return "answer"  # Default to book Q&A for everything else
 
-    def handle_prompt(self, prompt: str) -> str:
+    def route(self, prompt: str, book_title: Optional[str] = None) -> str:
+        """
+        Route user prompts to appropriate agents based on classification.
+        
+        Args:
+            prompt: User's input query
+            book_title: Selected book title (required for Q&A)
+            
+        Returns:
+            Response from the appropriate agent
+        """
         classification = self.classify_prompt(prompt)
-        if classification == "answer":
-            return self.answer_agent.handle(prompt)
-        elif classification == "organize":
-            if self.organizer_agent is None:
-                return "Organizer agent is not ready yet."
-            return self.organizer_agent.handle(prompt)
-        elif classification == "general":
-            if not openai_api_key:
-                return "⚠️ OpenAI API key is missing or invalid. Please check your .env file and restart the application."
-            return self.general_chat_response(prompt)
-        else:
-            return self.answer_agent.handle(prompt)  # Default to AnswerAgent for unknown classifications
-    
-    def general_chat_response(self, prompt: str) -> str:
-        """
-        Send prompt to OpenAI and return the response
-        """
-        if not openai_api_key:
-            return "⚠️ OpenAI API key is missing or invalid. Please check your .env file and restart the application."
-            
+        
         try:
-            response = openai.ChatCompletion.create(
-                model="gpt-4",
-                messages=[
-                    {"role": "system", "content": "You are BookHub, an AI book companion that helps users with questions about books, authors, and literature in general."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=500,
-                temperature=0.7
-            )
-            return response.choices[0].message['content']
-        except Exception as e:
-            error_message = str(e)
-            print(f"⚠️ Error calling OpenAI API: {error_message}")
-            
-            if "authentication" in error_message.lower() or "api key" in error_message.lower():
-                return "Sorry, there seems to be an issue with my API key. Please check your configuration and try again."
-            elif "rate limit" in error_message.lower():
-                return "I'm experiencing high demand right now. Please try again in a moment."
+            if classification == "organize":
+                if self.organizer_agent is None:
+                    return " Book organization service is not available. Please check your configuration."
+                return self.organizer_agent.handle(prompt)
+                
+            elif classification == "answer":
+                if not book_title:
+                    return " Please select a book first to ask questions about it."
+                    
+                try:
+                    answer_agent = AnswerAgent(book_title)
+                    return answer_agent.answer(prompt)
+                except Exception as e:
+                    return f" Error accessing book '{book_title}': {str(e)}. Make sure the book has been added to the system."
+                    
             else:
-                return "Sorry, I'm having trouble connecting to OpenAI. Please try again later or check your API key." 
+                return " I'm not sure how to process that request. Try asking about a book or adding a new book."
+                
+        except Exception as e:
+            return f" An unexpected error occurred: {str(e)}"
+    
+    def handle_prompt(self, prompt: str, book_title: Optional[str] = None) -> str:
+        """
+        Alias for route method to maintain compatibility.
+        """
+        return self.route(prompt, book_title)

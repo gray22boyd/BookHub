@@ -1,208 +1,307 @@
-from dotenv import load_dotenv
-import os
-
-import requests
-import textwrap
+﻿import os
 import re
-from typing import List
-from time import sleep
+import requests
 import tiktoken
-import time
-import faiss
-import numpy as np
-from dataclasses import dataclass
-import json
-# Example: Open_AI_Key = environ["OPENAI_KEY"]
-
-# OrganizingAgent: Tools for working with book text from Project Gutenberg
-
-load_dotenv()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
-
-@dataclass
-class BookRecord:
-    title: str
-    first_chunk: int
-    last_chunk: int
-
-import openai
-openai.api_key = OPENAI_API_KEY
+from typing import List, Optional
+from langchain_community.vectorstores import FAISS
+from langchain.docstore.document import Document
+from config.settings import config
+from services.embedding_service import EmbeddingService
 
 class OrganizingAgent:
+    """
+    Agent responsible for downloading, processing, and indexing books.
+    Uses centralized configuration and shared embedding service.
+    """
+    
     def __init__(self):
-        self.chunk_texts = []
-        self.index = faiss.IndexFlatL2(1536)
-        self.meta_data: List[BookRecord] = []
-
-    @staticmethod
-    def locate_book(book_title):
+        """Initialize the organizing agent."""
+        self.embedding_service = EmbeddingService()
+        
+    def _sanitize_title(self, title: str) -> str:
+        """Sanitize book title for use as directory name."""
+        return re.sub(r'[^\w\s-]', '', title.lower()).replace(' ', '_')
+    
+    def locate_book(self, book_title: str) -> str:
         """
-        Finds and downloads a plain text version of a book from the Gutendex API.
-        """
-        URL = f"https://gutendex.com/books/?search={book_title}"
-        headers = {
-            "Content-Type": "application/json"
-        }
-        resp = requests.get(URL, headers=headers)
-        data = resp.json()
-        text_file_url = data["results"][0]["formats"]["text/plain; charset=us-ascii"]
-        # Download the book text
-        text_json = requests.get(text_file_url)
-        text = text_json.text
-        return text
-
-    @staticmethod
-    def chunk_text_tiktoken(text, max_tokens=800, overlap=100):
-        """
-        Splits `text` into overlapping chunks, each with up to `max_tokens` tokens.
-        Uses OpenAI's tiktoken tokenizer.
-
+        Find and download a plain text version of a book from the Gutenberg API.
+        
         Args:
-            text (str): The full text to chunk.
-            max_tokens (int): Max tokens per chunk (800 is safe for most embeddings).
-            overlap (int): Overlap tokens between chunks (for context continuity).
-
+            book_title: Title of the book to search for
+            
         Returns:
-            list of str: List of text chunks.
+            Full text content of the book
+            
+        Raises:
+            Exception: If book cannot be found or downloaded
         """
-        tokenizer = tiktoken.get_encoding("cl100k_base")  # Best for OpenAI embeddings
-
-        # Normalize newlines for consistent splitting
-        text = text.replace('\r\n', '\n').replace('\r', '\n')
-        # Split into paragraphs for semantic boundaries
-        paragraphs = re.split(r'\n\s*\n', text)
-
-        chunks = []
-        current_chunk = []
-        current_token_count = 0
-
-        for para in paragraphs:
-            tokens = tokenizer.encode(para)
-            if current_token_count + len(tokens) > max_tokens:
-                # Finalize and store the current chunk
+        try:
+            # Search for the book
+            search_url = f"https://gutendx.com/books/?search={book_title}"
+            response = requests.get(search_url, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            
+            if not data.get("results"):
+                raise ValueError(f"No books found for '{book_title}' on Project Gutenberg")
+                
+            book = data["results"][0]
+            formats = book.get("formats", {})
+            
+            # Try multiple text formats in order of preference
+            text_url = None
+            format_preferences = [
+                "text/plain; charset=utf-8",
+                "text/plain; charset=us-ascii", 
+                "text/plain"
+            ]
+            
+            for format_key in format_preferences:
+                if format_key in formats:
+                    text_url = formats[format_key]
+                    break
+                    
+            if not text_url:
+                available_formats = list(formats.keys())
+                raise ValueError(
+                    f"No plain text format available for '{book_title}'. "
+                    f"Available formats: {', '.join(available_formats)}"
+                )
+            
+            # Download the book text
+            print(f"Downloading '{book_title}' from {text_url}")
+            text_response = requests.get(text_url, timeout=60)
+            text_response.raise_for_status()
+            
+            if not text_response.text:
+                raise ValueError(f"Downloaded text is empty for '{book_title}'")
+                
+            print(f"Successfully downloaded '{book_title}' ({len(text_response.text)} characters)")
+            return text_response.text
+            
+        except requests.RequestException as e:
+            raise Exception(f"Failed to download book '{book_title}': {e}")
+        except Exception as e:
+            raise Exception(f"Error processing book '{book_title}': {e}")
+    
+    def chunk_text(self, text: str) -> List[str]:
+        """
+        Split text into overlapping chunks using tiktoken tokenizer.
+        
+        Args:
+            text: Full text to chunk
+            
+        Returns:
+            List of text chunks with passage prefixes
+        """
+        try:
+            tokenizer = tiktoken.get_encoding("cl100k_base")
+            
+            # Normalize newlines for consistent splitting
+            text = text.replace('\r\n', '\n').replace('\r', '\n')
+            
+            # Remove Project Gutenberg header/footer if present
+            text = self._clean_gutenberg_text(text)
+            
+            # Split into paragraphs for semantic boundaries
+            paragraphs = re.split(r'\n\s*\n', text)
+            paragraphs = [p.strip() for p in paragraphs if p.strip()]
+            
+            chunks = []
+            current_chunk = []
+            current_token_count = 0
+            
+            for para in paragraphs:
+                tokens = tokenizer.encode(para)
+                
+                # If adding this paragraph exceeds the limit, finalize current chunk
+                if current_token_count + len(tokens) > config.CHUNK_SIZE:
+                    if current_chunk:  # Only add non-empty chunks
+                        full_chunk = " ".join(current_chunk)
+                        chunks.append(full_chunk)
+                    
+                    # Start new chunk with overlap if configured
+                    if config.CHUNK_OVERLAP > 0 and current_chunk:
+                        # Take the last part for overlap
+                        previous_text = " ".join(current_chunk)
+                        prev_tokens = tokenizer.encode(previous_text)
+                        if len(prev_tokens) > config.CHUNK_OVERLAP:
+                            overlap_tokens = prev_tokens[-config.CHUNK_OVERLAP:]
+                            overlap_text = tokenizer.decode(overlap_tokens)
+                            current_chunk = [overlap_text]
+                            current_token_count = len(overlap_tokens)
+                        else:
+                            current_chunk = []
+                            current_token_count = 0
+                    else:
+                        current_chunk = []
+                        current_token_count = 0
+                
+                current_chunk.append(para)
+                current_token_count += len(tokens)
+            
+            # Add any remaining chunk
+            if current_chunk:
                 full_chunk = " ".join(current_chunk)
                 chunks.append(full_chunk)
-
-                # Start new chunk with overlap
-                if overlap > 0 and len(current_chunk) > 0:
-                    # Take the last `overlap` tokens from the previous chunk
-                    previous_text = " ".join(current_chunk)
-                    prev_tokens = tokenizer.encode(previous_text)
-                    overlap_tokens = prev_tokens[-overlap:]
-                    overlap_text = tokenizer.decode(overlap_tokens)
-                    current_chunk = [overlap_text]
-                    current_token_count = len(overlap_tokens)
-                else:
-                    current_chunk = []
-                    current_token_count = 0
-
-            current_chunk.append(para)
-            current_token_count += len(tokens)
-
-        # Add any leftover chunk
-        if current_chunk:
-            chunks.append(" ".join(current_chunk))
-
-        return chunks
-
-    @staticmethod
-    # Passing functions into parameter, so that we may try different models or implementations
-    # for embedding or storing later on
-    def embed_and_store_chunks(chunks, embed_fn, store_fn, batch_size=10, delay=2):
+            
+            # Add passage prefixes as required by e5 model
+            prefixed_chunks = [f"passage: {chunk}" for chunk in chunks]
+            
+            print(f"Created {len(prefixed_chunks)} chunks from text")
+            return prefixed_chunks
+            
+        except Exception as e:
+            raise Exception(f"Failed to chunk text: {e}")
+    
+    def _clean_gutenberg_text(self, text: str) -> str:
+        """Remove Project Gutenberg header and footer."""
+        # Remove header (everything before "*** START OF")
+        start_match = re.search(r'\*\*\*\s*START OF (THE )?PROJECT GUTENBERG', text, re.IGNORECASE)
+        if start_match:
+            text = text[start_match.end():]
+            # Remove the rest of the start line
+            first_newline = text.find('\n')
+            if first_newline != -1:
+                text = text[first_newline + 1:]
+        
+        # Remove footer (everything after "*** END OF")
+        end_match = re.search(r'\*\*\*\s*END OF (THE )?PROJECT GUTENBERG', text, re.IGNORECASE)
+        if end_match:
+            text = text[:end_match.start()]
+        
+        return text.strip()
+    
+    def add_book(self, book_title: str) -> str:
         """
-        Embeds and stores text chunks in batches.
-
+        Add a book to the system by downloading, chunking, and indexing it.
+        
         Args:
-            chunks (list of str): The text chunks to embed.
-            embed_fn (callable): Function that takes a list of strings and returns list of embeddings.
-            store_fn (callable): Function that stores a batch of (chunk, embedding) pairs.
-            batch_size (int): Number of chunks per batch.
-            delay (int): Seconds to wait between batches.
+            book_title: Title of the book to add
+            
+        Returns:
+            Success or error message
         """
-        batch = []
-        indices = []
-        for i, chunk in enumerate(chunks):
-            batch.append(chunk)
-            indices.append(i)
-            if len(batch) == batch_size or i == len(chunks) - 1:
-                # 1. Embed the batch
-                embeddings = embed_fn(batch)  # Should return a list of vectors
-                # 2. Store the embeddings, keeping mapping to chunk indices if needed
-                store_fn(batch, embeddings, indices)
-                # 3. Wait to avoid API rate limits
-                time.sleep(delay)
-                batch = []
-                indices = []
-    @staticmethod
-    def embed_fn(chunks):
-        import openai
-        response = openai.embeddings.create(
-            input=chunks,
-            model="text-embedding-ada-002"
-        )
-        return [r.embedding for r in response.data]
-
-    def add_book_metadata(self, title: str, start_idx: int, end_idx: int):
-        self.meta_data.append(BookRecord(title, first_chunk=start_idx, last_chunk=end_idx))
-
-    def store_fn(self, batch, embeddings, indices):
-        arr = np.array(embeddings).astype('float32')
-        self.index.add(arr)
-        self.chunk_texts.extend(batch)
-
-    def save_to_disk(self, index_path="my_index.faiss", chunks_path="chunk_texts.json", meta_path="meta_data.json"):
-        faiss.write_index(self.index, index_path)
-        with open(chunks_path, "w", encoding="utf-8") as f:
-            json.dump(self.chunk_texts, f)
-        with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump([r.__dict__ for r in self.meta_data], f)
-
-    def load_from_disk(self, index_path="my_index.faiss", chunks_path="chunk_texts.json", meta_path="meta_data.json"):
-        self.index = faiss.read_index(index_path)
-        with open(chunks_path, "r", encoding="utf-8") as f:
-            self.chunk_texts = json.load(f)
-        with open(meta_path, "r", encoding="utf-8") as f:
-            records = json.load(f)
-            self.meta_data = [BookRecord(**r) for r in records]
-
-    def process_data(self, book_title, ):
-        # Actual 1. Load current data and check if the book is already stored in our data base
-            # If so pull the relevant chunks
-            # else continue with process
-
-        # Have agent correctly format the book title?
-
-
-        # 1. Download book
-        print("Downloading book...")
-        book_text = self.locate_book(book_title)
-
-        # 2. Chunk it
-        print("Chunking text...")
-        chunks = self.chunk_text_tiktoken(book_text)
-
-        # Check what our first index fo the new book will be d
-        start_index = self.index.ntotal
-
-        # 3. Embed and store
-        print("Embedding and storing chunks...")
-        print("Chunks to embed:", len(chunks))
-        self.embed_and_store_chunks(
-            chunks,
-            embed_fn=self.embed_fn,
-            store_fn=self.store_fn
-        )
-
-        # 4. Confirm FAISS storage
-        print("Total vectors stored in FAISS:", self.index.ntotal)
-
-        end_index = self.index.ntotal - 1
-
-        self.add_book_metadata(book_title, start_index, end_index)
-
-        # 5. View sample chunk and metadata
-        print("Sample chunk:", self.chunk_texts[20][:300], "...")
-
-
-
+        if not book_title or not book_title.strip():
+            return " Please provide a book title."
+        
+        book_title = book_title.strip()
+        sanitized_title = self._sanitize_title(book_title)
+        
+        try:
+            # Check if book already exists
+            book_folder = os.path.join(config.FAISS_INDEXES_DIR, sanitized_title)
+            if os.path.exists(book_folder):
+                return f" Book '{book_title}' already exists in the system!"
+            
+            # Create directories
+            os.makedirs(config.FAISS_INDEXES_DIR, exist_ok=True)
+            os.makedirs(book_folder, exist_ok=True)
+            
+            print(f"Processing '{book_title}'...")
+            
+            # Step 1: Download book
+            book_text = self.locate_book(book_title)
+            
+            # Step 2: Chunk the text
+            chunks = self.chunk_text(book_text)
+            
+            if not chunks:
+                raise ValueError("No text chunks were created from the book")
+            
+            # Step 3: Create documents for LangChain
+            documents = [Document(page_content=chunk) for chunk in chunks]
+            
+            # Step 4: Get embeddings and create vector store
+            print(f"Creating embeddings for {len(documents)} chunks...")
+            embeddings = self.embedding_service.get_embeddings()
+            
+            vectorstore = FAISS.from_documents(documents, embeddings)
+            
+            # Step 5: Save to disk
+            print(f"Saving index to {book_folder}")
+            vectorstore.save_local(book_folder)
+            
+            return f" Successfully added '{book_title}' to the system! You can now ask questions about it."
+            
+        except Exception as e:
+            # Clean up partial files if error occurred
+            try:
+                if os.path.exists(book_folder):
+                    import shutil
+                    shutil.rmtree(book_folder)
+            except:
+                pass
+            
+            error_msg = str(e)
+            if "No books found" in error_msg:
+                return f" Could not find '{book_title}' on Project Gutenberg. Please check the title and try again."
+            elif "No plain text format" in error_msg:
+                return f" '{book_title}' is not available in plain text format on Project Gutenberg."
+            elif "Failed to download" in error_msg:
+                return f" Failed to download '{book_title}'. Please check your internet connection and try again."
+            else:
+                return f" Error adding book '{book_title}': {error_msg}"
+    
+    def get_available_books(self) -> List[str]:
+        """Get list of books currently available in the system."""
+        try:
+            if not os.path.exists(config.FAISS_INDEXES_DIR):
+                return []
+            
+            books = []
+            for name in os.listdir(config.FAISS_INDEXES_DIR):
+                path = os.path.join(config.FAISS_INDEXES_DIR, name)
+                if os.path.isdir(path):
+                    # Convert sanitized name back to readable format
+                    readable_name = name.replace('_', ' ').title()
+                    books.append(readable_name)
+            
+            return sorted(books)
+        except Exception:
+            return []
+    
+    def handle(self, prompt: str) -> str:
+        """
+        Handle organization requests like adding books.
+        
+        Args:
+            prompt: User's request
+            
+        Returns:
+            Response message
+        """
+        if not prompt or not prompt.strip():
+            return " Please provide a request. You can add books by saying 'add [book title]'."
+        
+        prompt = prompt.strip().lower()
+        
+        try:
+            # Extract book title from prompt
+            if any(keyword in prompt for keyword in ["add", "upload", "ingest"]):
+                # Find the action word and extract everything after it
+                for keyword in ["add", "upload", "ingest"]:
+                    if keyword in prompt:
+                        # Split on the keyword and take everything after
+                        parts = prompt.split(keyword, 1)
+                        if len(parts) > 1 and parts[1].strip():
+                            book_title = parts[1].strip()
+                            # Remove common words that might be included
+                            book_title = re.sub(r'^(book|the book|a book)\s+', '', book_title, flags=re.IGNORECASE)
+                            return self.add_book(book_title)
+                        break
+                
+                return " Please specify a book title. Example: 'add Pride and Prejudice'"
+            
+            elif "list" in prompt or "show" in prompt or "available" in prompt:
+                books = self.get_available_books()
+                if books:
+                    return f" Available books:\n" + "\n".join(f" {book}" for book in books)
+                else:
+                    return " No books have been added to the system yet."
+            
+            else:
+                return " I can help you add books to the system. Try: 'add [book title]' or 'list books'."
+                
+        except Exception as e:
+            return f" An unexpected error occurred: {str(e)}"

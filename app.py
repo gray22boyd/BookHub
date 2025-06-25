@@ -1,138 +1,251 @@
 import streamlit as st
 import os
+from config.settings import config
 from lead_agent.lead_agent import LeadAgent
+from agents.organizer_agent import OrganizingAgent
 
-# Function to get available books with valid FAISS indexes
-def get_available_books():
-    books = []
-    # Check if faiss_indexes directory exists
-    if not os.path.exists("faiss_indexes"):
-        return books
-    
-    # Look for directories that contain both index.faiss and index.pkl files
-    for folder in os.listdir("faiss_indexes"):
-        folder_path = os.path.join("faiss_indexes", folder)
-        if os.path.isdir(folder_path):
-            if (os.path.exists(os.path.join(folder_path, "index.faiss")) and 
-                os.path.exists(os.path.join(folder_path, "index.pkl"))):
-                # Convert folder name back to book title format (replace underscores with spaces and capitalize)
-                book_title = " ".join(word.capitalize() for word in folder.split("_"))
-                books.append(book_title)
-    return books
+# Page configuration
+st.set_page_config(
+    page_title="BookHub AI Companion",
+    page_icon="📚",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# Initialize the LeadAgent
-lead_agent = LeadAgent()
-
-# Set up the Streamlit app
-st.set_page_config(page_title="BookHub – AI Book Companion", layout="centered")
-
-# Custom CSS
+# Custom CSS for modern styling
 st.markdown("""
 <style>
-    .main {
-        max-width: 800px;
-        margin: 0 auto;
-    }
-    .stApp {
-        background-color: #f9f9f9;
-    }
-    .chat-container {
-        max-height: 550px;
-        overflow-y: auto;
-        padding: 15px;
+    .main-header {
+        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+        padding: 2rem;
         border-radius: 10px;
-        background-color: white;
-        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
-        margin-bottom: 20px;
-    }
-    .user-bubble {
-        background-color: #e1f5fe;
-        color: #0277bd;
-        border-radius: 18px 18px 0 18px;
-        padding: 10px 15px;
-        margin: 8px 0;
-        max-width: 80%;
-        float: right;
-        clear: both;
-        word-wrap: break-word;
-    }
-    .bot-bubble {
-        background-color: #f1f1f1;
-        color: #424242;
-        border-radius: 18px 18px 18px 0;
-        padding: 10px 15px;
-        margin: 8px 0;
-        max-width: 80%;
-        float: left;
-        clear: both;
-        word-wrap: break-word;
-    }
-    .clearfix::after {
-        content: "";
-        clear: both;
-        display: table;
-    }
-    .chat-footer {
-        margin-top: 10px;
-    }
-    .stButton button {
-        background-color: #0277bd;
+        margin-bottom: 2rem;
+        text-align: center;
         color: white;
-        border-radius: 20px;
     }
-    .stTextInput input {
-        border-radius: 20px;
+    
+    .book-card {
+        background: #f8f9fa;
+        padding: 1.5rem;
+        border-radius: 10px;
+        border-left: 4px solid #667eea;
+        margin: 1rem 0;
+    }
+    
+    .usage-tip {
+        background: #e8f4f8;
+        padding: 1rem;
+        border-radius: 8px;
+        border-left: 4px solid #17a2b8;
+        margin: 1rem 0;
+    }
+    
+    .stButton > button {
+        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        padding: 0.5rem 1rem;
+        font-weight: 600;
+    }
+    
+    .stButton > button:hover {
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        transform: translateY(-2px);
     }
 </style>
 """, unsafe_allow_html=True)
 
-# Title
-st.markdown("<h1 style='text-align: center;'>📚 BookHub – AI Book Companion</h1>", unsafe_allow_html=True)
-
-# Get available books
-available_books = get_available_books()
-
-# Initialize session state for message history
-if 'messages' not in st.session_state:
-    st.session_state['messages'] = []
-
-# Display chat history in a scrollable container
-chat_container = st.container()
-with chat_container:
-    st.markdown('<div class="chat-container">', unsafe_allow_html=True)
-    for message in st.session_state['messages']:
-        if message['type'] == 'user':
-            st.markdown(f'<div class="user-bubble">{message["content"]}</div><div class="clearfix"></div>', unsafe_allow_html=True)
-        else:
-            st.markdown(f'<div class="bot-bubble">{message["content"]}</div><div class="clearfix"></div>', unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-
-# Create a form for user input with Send button
-with st.form(key='chat_form', clear_on_submit=True):
-    # Book selection dropdown
-    if available_books:
-        selected_book = st.selectbox("Select a book:", available_books)
-        placeholder_text = "Ask anything about this book..."
-    else:
-        selected_book = None
-        placeholder_text = "No books available with FAISS indexes. Please add a book first."
+def main():
+    # Header
+    st.markdown("""
+    <div class="main-header">
+        <h1>📚 BookHub AI Book Companion</h1>
+        <p>Your intelligent assistant for exploring and understanding books</p>
+    </div>
+    """, unsafe_allow_html=True)
     
-    col1, col2 = st.columns([4, 1])
+    # Initialize agents
+    lead_agent = LeadAgent()
+    organizer_agent = OrganizingAgent()
+    
+    # Sidebar
+    with st.sidebar:
+        st.header("📖 Book Management")
+        
+        # Available books
+        faiss_dir = config.FAISS_INDEXES_DIR
+        available_books = []
+        if os.path.exists(faiss_dir):
+            available_books = [d for d in os.listdir(faiss_dir) 
+                             if os.path.isdir(os.path.join(faiss_dir, d))]
+        
+        if available_books:
+            st.subheader("Available Books:")
+            for book in available_books:
+                book_display = book.replace('_', ' ').title()
+                st.markdown(f"<div class='book-card'>📚 {book_display}</div>", 
+                           unsafe_allow_html=True)
+        else:
+            st.info("No books available. Add some books using the section below!")
+        
+        st.divider()
+        
+        # Add new book
+        st.subheader("➕ Add New Book")
+        
+        with st.expander("Add Book from Project Gutenberg"):
+            book_id = st.number_input("Enter Gutenberg Book ID:", 
+                                    min_value=1, value=11, step=1)
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("Add Book", key="add_book"):
+                    with st.spinner("📥 Looking up book..."):
+                        try:
+                            # First get book info to get the real title
+                            import requests
+                            response = requests.get(f"https://gutendx.com/books/{book_id}")
+                            if response.status_code == 200:
+                                book_data = response.json()
+                                book_title = book_data.get('title', f'Book ID {book_id}')
+                                with st.spinner("📥 Downloading and processing book..."):
+                                    result = organizer_agent.add_book(book_title)
+                                    if "successfully" in result.lower():
+                                        st.success(f"✅ {result}")
+                                        st.rerun()
+                                    else:
+                                        st.error(f"❌ {result}")
+                            else:
+                                st.error(f"❌ Could not find book with ID {book_id}")
+                        except Exception as e:
+                            st.error(f"❌ Error looking up book: {str(e)}")
+            
+            with col2:
+                if st.button("Remove Book", key="remove_book"):
+                    if available_books:
+                        book_to_remove = st.selectbox("Select book to remove:", 
+                                                    available_books, key="book_select")
+                        if book_to_remove:
+                            st.info("📝 Book removal feature not yet implemented. You can manually delete the book folder from faiss_indexes directory.")
+                    else:
+                        st.info("No books to remove")
+        
+        # Popular books suggestions
+        st.markdown("""
+        <div class="usage-tip">
+            <strong>📋 Popular Book IDs:</strong><br>
+            • Alice in Wonderland: 11<br>
+            • Pride and Prejudice: 1342<br>
+            • Frankenstein: 84<br>
+            • Dracula: 345<br>
+            • The Great Gatsby: 64317
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # Main content area
+    col1, col2 = st.columns([2, 1])
+    
     with col1:
-        user_input = st.text_input("Your message", placeholder=placeholder_text, label_visibility="collapsed", disabled=not available_books)
+        st.header("💬 Chat with Your Books")
+        
+        # Book selection for chat
+        if available_books:
+            # Create a mapping of display names to directory names
+            book_options = {}
+            for book_dir in available_books:
+                display_name = book_dir.replace('_', ' ').title()
+                book_options[display_name] = book_dir
+            
+            selected_display = st.selectbox(
+                "📖 Select a book to chat about:",
+                options=list(book_options.keys()),
+                key="chat_book_selection"
+            )
+            selected_book_dir = book_options[selected_display]
+        else:
+            selected_display = None
+            selected_book_dir = None
+            st.warning("⚠️ No books available. Please add a book first using the sidebar.")
+        
+        # Chat interface
+        if "messages" not in st.session_state:
+            st.session_state.messages = []
+        
+        # Display chat messages
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+        
+        # Chat input
+        if prompt := st.chat_input("Ask me anything about your books..."):
+            # Add user message to chat history
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            
+            # Generate response
+            with st.chat_message("assistant"):
+                with st.spinner("🤔 Thinking..."):
+                    try:
+                        # Pass the directory name directly to match what AnswerAgent expects
+                        if selected_book_dir:
+                            response = lead_agent.handle_prompt(prompt, selected_book_dir)
+                        else:
+                            response = "Please select a book first before asking questions."
+                        
+                        st.markdown(response)
+                        st.session_state.messages.append({"role": "assistant", "content": response})
+                    except Exception as e:
+                        error_msg = f"❌ Sorry, I encountered an error: {str(e)}"
+                        st.error(error_msg)
+                        st.session_state.messages.append({"role": "assistant", "content": error_msg})
+    
     with col2:
-        submit_button = st.form_submit_button("Send", disabled=not available_books)
+        st.header("💡 Usage Tips")
+        
+        st.markdown("""
+        <div class="usage-tip">
+            <strong>🎯 Try these queries:</strong><br><br>
+            
+            <strong>Specific Content:</strong><br>
+            • "What is the 15th sentence in Alice in Wonderland?"<br>
+            • "Find the 3rd paragraph in Chapter 1 of Pride and Prejudice"<br><br>
+            
+            <strong>Analysis:</strong><br>
+            • "Summarize the main themes in Alice in Wonderland"<br>
+            • "Analyze the character development in Pride and Prejudice"<br><br>
+            
+            <strong>Search:</strong><br>
+            • "Find passages about the Cheshire Cat"<br>
+            • "What does the book say about love?"
+        </div>
+        """, unsafe_allow_html=True)
+        
+        if st.button("🗑️ Clear Chat History"):
+            st.session_state.messages = []
+            st.rerun()
+        
+        # System status
+        st.header("📊 System Status")
+        
+        status_container = st.container()
+        with status_container:
+            # Check if OpenAI API key is set
+            if config.OPENAI_API_KEY:
+                st.success("✅ OpenAI API Key configured")
+            else:
+                st.warning("⚠️ OpenAI API Key not set")
+            
+            # Check embedding model
+            st.info(f"🧠 Embedding Model: {config.EMBEDDING_MODEL}")
+            
+            # Check available books count
+            book_count = len(available_books)
+            if book_count > 0:
+                st.success(f"📚 {book_count} book(s) available")
+            else:
+                st.warning("📚 No books loaded")
 
-# Handle user input
-if submit_button and user_input and selected_book:
-    # Add user message to session state
-    st.session_state['messages'].append({'type': 'user', 'content': user_input})
-
-    # Get response from LeadAgent's route method
-    response = lead_agent.route(user_input, selected_book)
-
-    # Add AI response to session state
-    st.session_state['messages'].append({'type': 'bot', 'content': response})
-
-    # Force rerun to refresh the display
-    st.rerun() 
+if __name__ == "__main__":
+    main() 
