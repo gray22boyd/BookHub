@@ -1,0 +1,26 @@
+*** START OF THE PROJECT GUTENBERG EBOOK SAMPLE TEST BOOK ***
+
+SAMPLE TEST BOOK
+By Test Author
+
+Chapter 1: The Beginning
+
+It was the best of times, it was the worst of times. This is a sample book created to test the manual book addition feature when the Gutenberg API is unavailable.
+
+The quick brown fox jumps over the lazy dog. This sentence contains every letter of the alphabet. We need several sentences to test proper chunking and retrieval.
+
+In a hole in the ground there lived a hobbit. Not a nasty, dirty, wet hole, filled with the ends of worms and an oozy smell, nor yet a dry, bare, sandy hole with nothing in it to sit down on or to eat.
+
+Chapter 2: The Middle
+
+Call me Ishmael. Some years ago—never mind how long precisely—having little or no money in my purse, and nothing particular to interest me on shore, I thought I would sail about a little and see the watery part of the world.
+
+To be or not to be, that is the question. Whether 'tis nobler in the mind to suffer the slings and arrows of outrageous fortune, or to take arms against a sea of troubles.
+
+Chapter 3: The End
+
+All animals are equal, but some animals are more equal than others. This is the final chapter of our sample test book, designed to verify that the improved BookAgent can properly process and index local text files.
+
+The test concludes here. Thank you for testing the manual book addition feature.
+
+*** END OF THE PROJECT GUTENBERG EBOOK SAMPLE TEST BOOK *** 

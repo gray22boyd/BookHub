@@ -94,7 +94,56 @@ def main():
         # Add new book
         st.subheader("➕ Add New Book")
         
-        with st.expander("Add Book from Project Gutenberg"):
+        # Direct download with title
+        with st.expander("📥 Download by Title (Recommended)", expanded=True):
+            st.markdown("**Enter a book title to download directly:**")
+            
+            # Predefined popular books
+            popular_books = [
+                "Pride and Prejudice",
+                "Alice in Wonderland", 
+                "Frankenstein",
+                "Dracula",
+                "Moby Dick",
+                "The Great Gatsby",
+                "Jane Eyre",
+                "Romeo and Juliet",
+                "Hamlet"
+            ]
+            
+            # Quick selection buttons
+            st.markdown("**Quick Select:**")
+            cols = st.columns(3)
+            selected_title = None
+            
+            for i, book in enumerate(popular_books[:9]):
+                col_idx = i % 3
+                with cols[col_idx]:
+                    if st.button(book, key=f"quick_{i}", use_container_width=True):
+                        selected_title = book
+            
+            # Manual title input
+            manual_title = st.text_input(
+                "Or enter ANY book title:", 
+                value=selected_title if selected_title else "",
+                placeholder="e.g., Anna Karenina, War and Peace, 1984, etc..."
+            )
+            
+            if st.button("📥 Download Book", key="download_title", use_container_width=True):
+                if manual_title:
+                    with st.spinner(f"📥 Searching and downloading '{manual_title}'..."):
+                        result = lead_agent.download_gutenberg_book(manual_title)
+                        if "✅" in result:
+                            st.success(result)
+                            st.rerun()
+                        else:
+                            st.error(result)
+                else:
+                    st.warning("Please enter a book title or select from quick options")
+            
+            st.info("💡 **Now supports ANY book on Project Gutenberg!** Just type the title and we'll search for it automatically.")
+        
+        with st.expander("Add Book by Gutenberg ID"):
             book_id = st.number_input("Enter Gutenberg Book ID:", 
                                     min_value=1, value=11, step=1)
             
@@ -134,12 +183,14 @@ def main():
         # Popular books suggestions
         st.markdown("""
         <div class="usage-tip">
-            <strong>📋 Popular Book IDs:</strong><br>
-            • Alice in Wonderland: 11<br>
-            • Pride and Prejudice: 1342<br>
-            • Frankenstein: 84<br>
-            • Dracula: 345<br>
-            • The Great Gatsby: 64317
+            <strong>💡 Download ANY Book:</strong><br>
+            Try typing in chat:<br>
+            • "download Anna Karenina"<br>
+            • "download War and Peace"<br>
+            • "download 1984"<br>
+            • "download The Catcher in the Rye"<br>
+            • "download Crime and Punishment"<br><br>
+            <em>System searches Project Gutenberg automatically!</em>
         </div>
         """, unsafe_allow_html=True)
     
@@ -188,11 +239,20 @@ def main():
             with st.chat_message("assistant"):
                 with st.spinner("🤔 Thinking..."):
                     try:
-                        # Pass the directory name directly to match what AnswerAgent expects
-                        if selected_book_dir:
+                        # Check if it's a download command (doesn't need book selection)
+                        if prompt.lower().startswith("download "):
+                            response = lead_agent.handle_prompt(prompt, None)
+                            # If download was successful, refresh the page to show new book
+                            if "✅" in response and "downloaded and added" in response:
+                                st.rerun()
+                        # Check if it's an organize command (also doesn't need book selection)
+                        elif any(keyword in prompt.lower() for keyword in ["add", "upload", "ingest", "download samples", "list books"]):
+                            response = lead_agent.handle_prompt(prompt, None)
+                        # For book-specific questions, require book selection
+                        elif selected_book_dir:
                             response = lead_agent.handle_prompt(prompt, selected_book_dir)
                         else:
-                            response = "Please select a book first before asking questions."
+                            response = "📚 Please select a book first before asking questions, or try:\n• 'download [book title]' to add a new book\n• 'list books' to see available books"
                         
                         st.markdown(response)
                         st.session_state.messages.append({"role": "assistant", "content": response})
@@ -206,17 +266,23 @@ def main():
         
         st.markdown("""
         <div class="usage-tip">
-            <strong>🎯 Try these queries:</strong><br><br>
+            <strong>🎯 Try these commands:</strong><br><br>
             
-            <strong>Specific Content:</strong><br>
+            <strong>📥 Download ANY Book:</strong><br>
+            • "download Anna Karenina"<br>
+            • "download War and Peace"<br>
+            • "download 1984"<br>
+            • "download Pride and Prejudice"<br><br>
+            
+            <strong>📍 Specific Content:</strong><br>
             • "What is the 15th sentence in Alice in Wonderland?"<br>
-            • "Find the 3rd paragraph in Chapter 1 of Pride and Prejudice"<br><br>
+            • "Find the 3rd paragraph in Chapter 1"<br><br>
             
-            <strong>Analysis:</strong><br>
-            • "Summarize the main themes in Alice in Wonderland"<br>
-            • "Analyze the character development in Pride and Prejudice"<br><br>
+            <strong>🔍 Analysis:</strong><br>
+            • "Summarize the main themes"<br>
+            • "Analyze the character development"<br><br>
             
-            <strong>Search:</strong><br>
+            <strong>🔎 Search:</strong><br>
             • "Find passages about the Cheshire Cat"<br>
             • "What does the book say about love?"
         </div>
