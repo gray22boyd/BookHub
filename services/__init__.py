@@ -1,1 +1,1 @@
-# Services package\n
+# Services package

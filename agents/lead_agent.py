@@ -1,7 +1,6 @@
 ﻿from typing import Optional
 from config.settings import config
-from agents.answer_agent import AnswerAgent
-from agents.organizer_agent import OrganizingAgent
+from services.BookApiClient import OrganizingAgent
 
 class LeadAgent:
     """

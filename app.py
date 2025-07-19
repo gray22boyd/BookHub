@@ -1,8 +1,7 @@
 import streamlit as st
 import os
 from config.settings import config
-from lead_agent.lead_agent import LeadAgent
-from agents.organizer_agent import OrganizingAgent
+from services.BookApiClient import OrganizingAgent
 
 # Page configuration
 st.set_page_config(
