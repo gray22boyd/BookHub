@@ -1,8 +1,11 @@
-﻿from typing import List, Optional
-from config.settings import config
-from enum import Enum
-from exceptions import ApiConnectionError
+﻿from enum import Enum
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from Endpoints.Gutenberg import Gutenberg
+from exceptions import ApiConnectionError
+import nltk
+nltk.download('punkt')
 
 class BookSource(Enum):
     PROJECT_GUTENBERG = "gutenberg"
@@ -12,25 +15,27 @@ class BookSource(Enum):
     STORAGE = "storage"
 
 class BookApiClient:
-    def __init__(self, source: Enum = BookSource.STORAGE, api_key: str = None):
+    def __init__(self, book_title: str, source: Enum = BookSource.STORAGE,  api_key: str | None = None, author_name: str | None = None, translator: str | None = None):
         self.source = source
         self.api_key = api_key
+        self.book_title = book_title
+        self.author_name = author_name
+        self.translator = translator
+        self.endpoint = self.initalize_endpoint()
 
-    def get_book_text(self, book_title: str, author_name: str, translator: str = None):
-        """
-        Get a book from the API.
-
-        Args:
-            book_title: Title of the book to search for
-
-        Returns:
-            Full text file of the book requested
-        """
+    def initalize_endpoint(self):
         if self.source == BookSource.PROJECT_GUTENBERG:
-            return Gutenberg(book_title, author_name).get_book_text()
+            if self.book_title is None:
+                raise ValueError("book_title is required for Gutenberg source")
+            return Gutenberg(book_title=self.book_title, author_name=self.author_name, translator=self.translator)
         else:
             raise ValueError(f"Unsupported book source: {self.source}")
-    
-    def header_and_footer_removal(self, book_text: str) -> str:
-        pass
 
+    def tokenize_text(self):
+        from nltk.tokenize import sent_tokenize
+        text = self.endpoint.remove_gutenberg_header_footer()
+
+        sentences = sent_tokenize(text)
+        return sentences
+
+    
