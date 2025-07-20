@@ -1,9 +1,10 @@
 import os
 import re
 import joblib
+import json
 from typing import Optional, List, Dict, Any
 from langchain.chains import RetrievalQA
-from langchain_openai import OpenAI
+from langchain_openai import ChatOpenAI
 from langchain_community.vectorstores import FAISS
 from langchain.retrievers import BM25Retriever, EnsembleRetriever
 from langchain.docstore.document import Document
@@ -13,7 +14,10 @@ from config.settings import config
 from services.embedding_service import EmbeddingService
 
 class AnswerAgent:
+    """Handles question answering for books using hybrid retrieval and LLM generation."""
+    
     def __init__(self, book_directory: str):
+        """Initialize the answer agent with a specific book directory."""
         if not book_directory or not book_directory.strip():
             raise ValueError("Book directory cannot be empty")
             
@@ -41,6 +45,20 @@ class AnswerAgent:
                 allow_dangerous_deserialization=True
             )
             
+            # Load sentence index for positional lookups
+            sentence_index_path = os.path.join(index_path, "sentence_index.json")
+            self.sentence_index = None
+            if os.path.exists(sentence_index_path):
+                try:
+                    with open(sentence_index_path, "r", encoding="utf-8") as f:
+                        self.sentence_index = json.load(f)
+                    print(f"📚 Loaded sentence index with {len(self.sentence_index)} sentences")
+                except (json.JSONDecodeError, IOError) as e:
+                    print(f"⚠️ Warning: Could not load sentence index: {e}")
+                    self.sentence_index = None
+            else:
+                print(f"⚠️ Warning: No sentence index found at {sentence_index_path}")
+            
             # Initialize hybrid retrieval
             self._setup_hybrid_retrieval()
             
@@ -52,7 +70,8 @@ class AnswerAgent:
             os.makedirs(self.cache_dir, exist_ok=True)
             
             # Initialize QA chain with better prompt
-            self.llm = OpenAI(
+            self.llm = ChatOpenAI(
+                model="gpt-4-turbo",
                 temperature=config.OPENAI_TEMPERATURE,
                 max_tokens=config.OPENAI_MAX_TOKENS
             )
@@ -162,6 +181,7 @@ class AnswerAgent:
             pass
     
     def _get_available_books(self) -> list:
+        """Get list of available books from the indexes directory."""
         try:
             if not os.path.exists(config.FAISS_INDEXES_DIR):
                 return []
@@ -172,64 +192,94 @@ class AnswerAgent:
         except Exception:
             return []
     
-    def _detect_specific_queries(self, query: str) -> Optional[str]:
-        sentence_match = re.search(r'what is the (\d+)(?:st|nd|rd|th)? sentence', query.lower())
-        if sentence_match:
-            sentence_num = int(sentence_match.group(1))
-            return self._get_sentence_by_number(sentence_num)
+    def _get_sentence_by_position(self, sentence_num: int) -> Optional[str]:
+        """Get specific sentence using pre-loaded sentence index."""
+        if self.sentence_index is None:
+            return None
         
-        paragraph_match = re.search(r'what is the (\d+)(?:st|nd|rd|th)? paragraph', query.lower())
-        if paragraph_match:
-            paragraph_num = int(paragraph_match.group(1))
-            return self._get_paragraph_by_number(paragraph_num)
+        if sentence_num < 1:
+            return f"❌ Invalid sentence number: {sentence_num}. Sentence numbers start from 1."
         
-        return None
+        if sentence_num > len(self.sentence_index):
+            return f"The book only has {len(self.sentence_index)} sentences."
+        
+        # Get the sentence (index is 1-based)
+        sentence_data = self.sentence_index[sentence_num - 1]
+        return f"📝 Sentence {sentence_num}: {sentence_data['text']}"
+
+    def _detect_positional_sentence_query(self, query: str) -> Optional[str]:
+        """Detect and handle positional sentence queries using pre-loaded index."""
+        import re
+        
+        # Enhanced sentence patterns
+        patterns = [
+            r'what is the (\d+)(?:st|nd|rd|th)? sentence',
+            r'show me (?:the )?(\d+)(?:st|nd|rd|th)? sentence',
+            r'give me (?:the )?(\d+)(?:st|nd|rd|th)? sentence',
+            r'get (?:the )?(\d+)(?:st|nd|rd|th)? sentence',
+            r'find (?:the )?(\d+)(?:st|nd|rd|th)? sentence',
+            r'(?:the )?(\d+)(?:st|nd|rd|th)? sentence',
+            r'sentence (\d+)',
+            r'what is sentence (\d+)',
+            r'show sentence (\d+)',
+            r'what is the (first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth) sentence'
+        ]
+        
+        # Number word to digit mapping
+        word_to_num = {
+            'first': 1, 'second': 2, 'third': 3, 'fourth': 4, 'fifth': 5,
+            'sixth': 6, 'seventh': 7, 'eighth': 8, 'ninth': 9, 'tenth': 10,
+            'eleventh': 11, 'twelfth': 12, 'thirteenth': 13, 'fourteenth': 14, 'fifteenth': 15,
+            'sixteenth': 16, 'seventeenth': 17, 'eighteenth': 18, 'nineteenth': 19, 'twentieth': 20
+        }
+        
+        sentence_num = None
+        for pattern in patterns:
+            match = re.search(pattern, query.lower())
+            if match:
+                matched_value = match.group(1)
+                if matched_value.isdigit():
+                    sentence_num = int(matched_value)
+                elif matched_value in word_to_num:
+                    sentence_num = word_to_num[matched_value]
+                break
+        
+        if sentence_num is None:
+            return None
+        
+        print(f"🎯 DEBUG: Positional sentence lookup for sentence #{sentence_num}")
+        return self._get_sentence_by_position(sentence_num)
+
+
+
     
-    def _get_sentence_by_number(self, sentence_num: int) -> str:
-        """Get specific sentence from full book text."""
-        try:
-            # Load full book text
-            text_path = os.path.join(config.FAISS_INDEXES_DIR, self.sanitized_title, "book_text.txt")
-            if not os.path.exists(text_path):
-                return f"Full book text not found. The book may need to be re-indexed."
-            
-            with open(text_path, "r", encoding="utf-8") as f:
-                text = f.read()
-
-            # Split into sentences
-            sentences = re.split(r'(?<=[.!?])\s+', text)
-            sentences = [s.strip() for s in sentences if s.strip()]
-
-            if sentence_num < 1 or sentence_num > len(sentences):
-                return f"Sentence number {sentence_num} is out of range. The book has {len(sentences)} sentences."
-
-            return f"Sentence {sentence_num}: {sentences[sentence_num - 1]}"
-            
-        except Exception as e:
-            return f"Failed to fetch sentence {sentence_num}: {e}"
     
     def _get_paragraph_by_number(self, paragraph_num: int) -> str:
-        """Get specific paragraph from full book text."""
+        """Get specific paragraph from structured paragraph index."""
         try:
-            # Load full book text
-            text_path = os.path.join(config.FAISS_INDEXES_DIR, self.sanitized_title, "book_text.txt")
-            if not os.path.exists(text_path):
-                return f"Full book text not found. The book may need to be re-indexed."
+            # Load paragraph index
+            paragraph_index_path = os.path.join(config.FAISS_INDEXES_DIR, self.sanitized_title, "paragraph_index.json")
+            if not os.path.exists(paragraph_index_path):
+                return f"📚 Paragraph index not found. The book may need to be re-indexed with the latest version."
             
-            with open(text_path, "r", encoding="utf-8") as f:
-                text = f.read()
-
-            # Split into paragraphs
-            paragraphs = re.split(r'\n\s*\n', text)
-            paragraphs = [p.strip() for p in paragraphs if p.strip()]
-
-            if paragraph_num < 1 or paragraph_num > len(paragraphs):
-                return f"Paragraph number {paragraph_num} is out of range. The book has {len(paragraphs)} paragraphs."
-
-            return f"Paragraph {paragraph_num}: {paragraphs[paragraph_num - 1]}"
+            with open(paragraph_index_path, "r", encoding="utf-8") as f:
+                paragraph_index = json.load(f)
             
+            # Validate paragraph number
+            if paragraph_num < 1:
+                return f"❌ Invalid paragraph number: {paragraph_num}. Paragraph numbers start from 1."
+            
+            if paragraph_num > len(paragraph_index):
+                return f"❌ Paragraph number {paragraph_num} is out of range. This book has {len(paragraph_index)} paragraphs available."
+            
+            # Get the paragraph (index is 1-based)
+            paragraph_data = paragraph_index[paragraph_num - 1]
+            return f"📄 Paragraph {paragraph_num}: {paragraph_data['text']}"
+            
+        except json.JSONDecodeError as e:
+            return f"❌ Error reading paragraph index: {e}"
         except Exception as e:
-            return f"Failed to fetch paragraph {paragraph_num}: {e}"
+            return f"❌ Failed to fetch paragraph {paragraph_num}: {e}"
     
     def _verify_answer_quality(self, answer: str) -> bool:
         """Verify if the answer meets quality standards."""
@@ -276,6 +326,7 @@ Answer:"""
         return prompt
     
     def answer(self, query: str) -> str:
+        """Answer a question about the book using hybrid retrieval and LLM generation."""
         if not query or not query.strip():
             return "Please provide a question about the book."
         
@@ -288,11 +339,13 @@ Answer:"""
             return cached_result
         
         try:
-            # Handle specific sentence/paragraph queries
-            specific_response = self._detect_specific_queries(query)
-            if specific_response:
-                self._cache_result(query, specific_response)
-                return specific_response
+            # Check for positional sentence queries using pre-loaded index (fastest)
+            positional_response = self._detect_positional_sentence_query(query)
+            if positional_response:
+                self._cache_result(query, positional_response)
+                return positional_response
+            
+
             
             # Step 1: Hybrid retrieval
             print(f"Performing hybrid retrieval for: {query}")
@@ -310,13 +363,14 @@ Answer:"""
             reranked_docs = self._rerank_documents(query, retrieved_docs)
             
             # Step 3: Format structured prompt
-            formatted_prompt = self._format_retrieval_prompt(query, reranked_docs[:5])  # Use top 5
+            # TODO: Replace with dynamic token-aware truncation if needed
+            formatted_prompt = self._format_retrieval_prompt(query, reranked_docs[:2])  # Use top 2
             
             # Debug output
             print(f"Top retrieved chunk: {reranked_docs[0].page_content[:100]}...")
             
             # Step 4: Generate answer
-            result = self.llm(formatted_prompt)
+            result = self.llm.invoke(formatted_prompt).content
             
             # Step 5: Verify answer quality
             if not self._verify_answer_quality(result):

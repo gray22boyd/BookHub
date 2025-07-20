@@ -3,7 +3,8 @@ import re
 import requests
 import tiktoken
 import nltk
-from typing import List, Optional
+import json
+from typing import List, Optional, Dict, Any
 from langchain_community.vectorstores import FAISS
 from langchain.docstore.document import Document
 from config.settings import config
@@ -101,8 +102,34 @@ class OrganizingAgent:
         Returns:
             List of text chunks with passage prefixes
         """
+        print(f"🔍 DEBUG: Starting chunking process...")
+        print(f"🔍 DEBUG: Input text length: {len(text)} characters")
+        
+        # Validate chunk size configuration
+        if not hasattr(config, 'CHUNK_SIZE') or config.CHUNK_SIZE < 500:
+            print(f"⚠️  WARNING: CHUNK_SIZE is too small ({getattr(config, 'CHUNK_SIZE', 'undefined')}), setting to 800")
+            config.CHUNK_SIZE = 800
+        elif config.CHUNK_SIZE > 2000:
+            print(f"⚠️  WARNING: CHUNK_SIZE is very large ({config.CHUNK_SIZE}), consider reducing for better performance")
+        
+        print(f"🔍 DEBUG: Using CHUNK_SIZE: {config.CHUNK_SIZE}")
+        
         try:
-            from nltk.tokenize import sent_tokenize
+            # Ensure NLTK punkt tokenizer is available
+            try:
+                import nltk
+                from nltk.tokenize import sent_tokenize
+                
+                # Force download punkt if not available
+                try:
+                    sent_tokenize("Test sentence.")
+                except LookupError:
+                    print("📥 DEBUG: Downloading NLTK punkt tokenizer...")
+                    nltk.download('punkt', quiet=True)
+                    print("✅ DEBUG: NLTK punkt tokenizer downloaded successfully")
+                
+            except Exception as e:
+                raise Exception(f"Failed to initialize NLTK tokenizer: {e}")
             
             tokenizer = tiktoken.get_encoding("cl100k_base")
             
@@ -111,9 +138,33 @@ class OrganizingAgent:
             
             # Remove Project Gutenberg header/footer if present
             text = self._clean_gutenberg_text(text)
+            print(f"🔍 DEBUG: Text length after cleaning: {len(text)} characters")
+            
+            # Validate cleaned text
+            if not text or len(text.strip()) < 500:
+                raise Exception(f"Cleaned text is too short: {len(text)} characters (minimum 500 required)")
             
             # Use NLTK for better sentence tokenization
-            sentences = sent_tokenize(text)
+            print(f"🔍 DEBUG: Starting sentence tokenization...")
+            try:
+                sentences = sent_tokenize(text)
+            except Exception as e:
+                raise Exception(f"Sentence tokenization failed: {e}")
+            
+            # DEBUG: Print sentence statistics
+            print(f"🔍 DEBUG: Number of sentences found: {len(sentences)}")
+            
+            if not sentences:
+                raise Exception("Sentence tokenization returned empty list - check text content and format")
+            
+            if len(sentences) < 10:
+                raise Exception(f"Too few sentences found ({len(sentences)}) - this may not be a valid book text")
+            
+            # Show first few sentences for debugging
+            print(f"🔍 DEBUG: First 3 sentences:")
+            for i, sent in enumerate(sentences[:3]):
+                clean_sent = sent.strip().replace('\n', ' ')[:100]
+                print(f"  {i+1}: {clean_sent}...")
             
             chunks = []
             current_chunk = ""
@@ -168,30 +219,234 @@ class OrganizingAgent:
             if current_chunk:
                 chunks.append(f"passage: {current_chunk.strip()}")
             
-            print(f"Created {len(chunks)} sentence-aware chunks from text")
+            # Final validation of chunks
+            print(f"🔍 DEBUG: Created {len(chunks)} sentence-aware chunks from text")
+            
+            if not chunks:
+                raise Exception("No valid text content found—check encoding or input file format. Chunking produced 0 chunks.")
+            
+            if len(chunks) < 5:
+                print(f"⚠️  WARNING: Very few chunks created ({len(chunks)}). This might indicate issues with the text format.")
+            
+            # Show sample chunk for debugging
+            if chunks:
+                sample_chunk = chunks[0][:200] + "..." if len(chunks[0]) > 200 else chunks[0]
+                print(f"🔍 DEBUG: Sample chunk: {sample_chunk}")
+            
+            print(f"✅ DEBUG: Chunking completed successfully with {len(chunks)} chunks")
             return chunks
             
         except Exception as e:
+            print(f"❌ DEBUG: Chunking failed with error: {str(e)}")
             raise Exception(f"Failed to chunk text: {e}")
     
     def _clean_gutenberg_text(self, text: str) -> str:
-        """Remove Project Gutenberg header and footer."""
+        """Remove Project Gutenberg header and footer, and find actual story start."""
+        print(f"🔍 DEBUG: Starting enhanced text cleaning, original length: {len(text)}")
+        
+        original_length = len(text)
+        
         # Remove header (everything before "*** START OF")
         start_match = re.search(r'\*\*\*\s*START OF (THE )?PROJECT GUTENBERG', text, re.IGNORECASE)
         if start_match:
+            print(f"🔍 DEBUG: Found Gutenberg START marker at position {start_match.start()}")
             text = text[start_match.end():]
             # Remove the rest of the start line
             first_newline = text.find('\n')
             if first_newline != -1:
                 text = text[first_newline + 1:]
+            print(f"🔍 DEBUG: Removed header, new length: {len(text)}")
+        else:
+            print(f"🔍 DEBUG: No Gutenberg START marker found")
         
         # Remove footer (everything after "*** END OF")
         end_match = re.search(r'\*\*\*\s*END OF (THE )?PROJECT GUTENBERG', text, re.IGNORECASE)
         if end_match:
+            print(f"🔍 DEBUG: Found Gutenberg END marker at position {end_match.start()}")
             text = text[:end_match.start()]
+            print(f"🔍 DEBUG: Removed footer, new length: {len(text)}")
+        else:
+            print(f"🔍 DEBUG: No Gutenberg END marker found")
         
-        return text.strip()
-    
+        # Smart story content detection
+        story_start_pos = self._find_story_beginning(text)
+        if story_start_pos > 0:
+            print(f"🎯 DEBUG: Found actual story beginning at position {story_start_pos}")
+            text = text[story_start_pos:]
+            print(f"🔍 DEBUG: Removed front matter, new length: {len(text)}")
+        
+        cleaned_text = text.strip()
+        print(f"🔍 DEBUG: Final cleaned text length: {len(cleaned_text)} (removed {original_length - len(cleaned_text)} characters)")
+        
+        # Validate cleaned text
+        if len(cleaned_text) < 0.1 * original_length:
+            print(f"⚠️  WARNING: Cleaned text is suspiciously short ({len(cleaned_text)} chars vs original {original_length})")
+        
+        return cleaned_text
+
+    def _find_story_beginning(self, text: str) -> int:
+        """Find where the actual story content begins by looking for common patterns."""
+        print(f"🔍 DEBUG: Searching for actual story beginning...")
+        
+        # Define story beginning patterns for different books
+        story_patterns = [
+            # Anna Karenina
+            r'happy families are all alike',
+            r'all happy families are alike',
+            r'happy families are alike',
+            
+            # General chapter markers
+            r'^chapter\s+(one|i|1)\s*$',
+            r'^chapter\s+1\s*$',
+            r'^i\s*$',  # Roman numeral I
+            
+            # Part markers
+            r'^part\s+(one|i|1)\s*$',
+            r'^part\s+1\s*$',
+            
+            # Common story openings
+            r'^it was the best of times',
+            r'^call me ishmael',
+            r'^in a hole in the ground',
+            r'^mr\.?\s+and mrs\.?\s+dursley',
+            r'^it is a truth universally acknowledged',
+            
+            # Generic narrative starters
+            r'^(the|there|it|in|on|at|when|once)\s+\w+',
+        ]
+        
+        # Convert to lowercase for matching
+        text_lower = text.lower()
+        
+        # Look for patterns in the text
+        best_match_pos = 0
+        best_pattern = None
+        
+        for pattern in story_patterns:
+            # Search for pattern at line beginnings
+            matches = list(re.finditer(pattern, text_lower, re.MULTILINE | re.IGNORECASE))
+            
+            for match in matches:
+                pos = match.start()
+                
+                # Make sure we're at the beginning of a line (or close to it)
+                line_start = text.rfind('\n', 0, pos) + 1
+                if pos - line_start < 10:  # Allow some whitespace
+                    # Check that this isn't too early (skip table of contents, etc.)
+                    if pos > 500:  # Must be at least 500 chars in (skip front matter)
+                        print(f"🎯 DEBUG: Found story pattern '{pattern}' at position {pos}")
+                        if pos > best_match_pos:
+                            best_match_pos = pos
+                            best_pattern = pattern
+        
+        # If we found a good match, find the start of that line
+        if best_match_pos > 0:
+            line_start = text.rfind('\n', 0, best_match_pos)
+            if line_start == -1:
+                line_start = 0
+            else:
+                line_start += 1  # Start after the newline
+            
+            print(f"✅ DEBUG: Best story start found with pattern '{best_pattern}' at line position {line_start}")
+            return line_start
+        
+        # Fallback: look for first substantial paragraph after a certain point
+        print(f"🔍 DEBUG: No specific pattern found, looking for substantial content...")
+        
+        # Skip at least the first 1000 characters (likely front matter)
+        search_start = min(1000, len(text) // 4)
+        
+        # Find paragraphs (double newlines)
+        paragraphs = re.split(r'\n\s*\n', text[search_start:])
+        
+        for i, paragraph in enumerate(paragraphs):
+            paragraph = paragraph.strip()
+            
+            # Look for a substantial paragraph (not just headings or single lines)
+            if (len(paragraph) > 100 and  # At least 100 characters
+                paragraph.count('.') >= 2 and  # At least 2 sentences
+                not paragraph.isupper() and  # Not all caps (headings)
+                not re.match(r'^(chapter|part|book)\s+', paragraph.lower())):  # Not chapter headers
+                
+                # Find this paragraph in the original text
+                para_pos = text.find(paragraph, search_start)
+                if para_pos > 0:
+                    print(f"📖 DEBUG: Found substantial story content at position {para_pos}")
+                    return para_pos
+        
+        print(f"❌ DEBUG: Could not identify story beginning, using text as-is")
+        return 0
+
+    def _create_sentence_index(self, text: str, book_folder: str) -> None:
+        """Create indexed sentence structure for positional lookups."""
+        print(f"🔍 DEBUG: Creating sentence index...")
+        
+        try:
+            from nltk.tokenize import sent_tokenize
+            
+            # Ensure NLTK punkt tokenizer is available
+            try:
+                sent_tokenize("Test sentence.")
+            except LookupError:
+                print("📥 DEBUG: Downloading NLTK punkt tokenizer for sentence indexing...")
+                nltk.download('punkt', quiet=True)
+            
+            sentences = sent_tokenize(text)
+            
+            # Create sentence index
+            sentence_index = []
+            for i, sentence in enumerate(sentences, 1):
+                sentence = sentence.strip()
+                if sentence:  # Skip empty sentences
+                    sentence_index.append({
+                        "index": i,
+                        "text": sentence
+                    })
+            
+            # Save sentence index
+            sentence_index_path = os.path.join(book_folder, "sentence_index.json")
+            with open(sentence_index_path, "w", encoding="utf-8") as f:
+                json.dump(sentence_index, f, ensure_ascii=False, indent=2)
+            
+            print(f"✅ DEBUG: Created sentence index with {len(sentence_index)} sentences")
+            print(f"💾 DEBUG: Saved sentence index to {sentence_index_path}")
+            
+        except Exception as e:
+            print(f"❌ DEBUG: Failed to create sentence index: {e}")
+
+    def _create_paragraph_index(self, text: str, book_folder: str) -> None:
+        """Create indexed paragraph structure for positional lookups."""
+        print(f"🔍 DEBUG: Creating paragraph index...")
+        
+        try:
+            # Split into paragraphs (double newlines or significant spacing)
+            # First normalize different line endings
+            text = text.replace('\r\n', '\n').replace('\r', '\n')
+            
+            # Split on double newlines or significant whitespace patterns
+            paragraphs = re.split(r'\n\s*\n', text)
+            
+            # Create paragraph index
+            paragraph_index = []
+            for i, paragraph in enumerate(paragraphs, 1):
+                paragraph = paragraph.strip()
+                if paragraph and len(paragraph) > 20:  # Skip very short "paragraphs"
+                    paragraph_index.append({
+                        "index": i,
+                        "text": paragraph
+                    })
+            
+            # Save paragraph index
+            paragraph_index_path = os.path.join(book_folder, "paragraph_index.json")
+            with open(paragraph_index_path, "w", encoding="utf-8") as f:
+                json.dump(paragraph_index, f, ensure_ascii=False, indent=2)
+            
+            print(f"✅ DEBUG: Created paragraph index with {len(paragraph_index)} paragraphs")
+            print(f"💾 DEBUG: Saved paragraph index to {paragraph_index_path}")
+            
+        except Exception as e:
+            print(f"❌ DEBUG: Failed to create paragraph index: {e}")
+
     def add_book(self, book_title: str) -> str:
         """
         Add a book to the system by downloading, chunking, and indexing it.
@@ -232,6 +487,10 @@ class OrganizingAgent:
                 f.write(cleaned_text)
             print(f"Saved full cleaned text to {text_path}")
             
+            # Step 2.6: Create sentence and paragraph indexes for positional lookups
+            self._create_sentence_index(cleaned_text, book_folder)
+            self._create_paragraph_index(cleaned_text, book_folder)
+            
             # Step 3: Chunk the text
             chunks = self.chunk_text(cleaned_text)
             
@@ -261,7 +520,9 @@ class OrganizingAgent:
             # Step 6: Save to disk
             print(f"Saving index to {book_folder}")
             try:
-                vectorstore = FAISS.from_embeddings(list(zip(all_vectors, texts)))
+                # Create embeddings list with proper format for FAISS
+                embedding_pairs = list(zip(texts, all_vectors))
+                vectorstore = FAISS.from_embeddings(embedding_pairs, embeddings)
                 vectorstore.save_local(book_folder)
                 print("Index saved successfully.")
             except Exception as e:
@@ -303,6 +564,13 @@ class OrganizingAgent:
         if not book_title or not book_title.strip():
             return " Please provide a book title."
         
+        # DEBUG: Print file path for debugging
+        print(f"🔍 DEBUG: Processing file path: {file_path}")
+        print(f"🔍 DEBUG: File exists check: {os.path.exists(file_path)}")
+        if os.path.exists(file_path):
+            file_size = os.path.getsize(file_path)
+            print(f"🔍 DEBUG: File size: {file_size} bytes")
+        
         if not os.path.exists(file_path):
             return f" File not found: {file_path}"
         
@@ -321,21 +589,44 @@ class OrganizingAgent:
             
             print(f"Processing '{book_title}' from local file...")
             
-            # Step 1: Read book from file
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    book_text = f.read()
-            except UnicodeDecodeError:
-                # Try different encodings
-                try:
-                    with open(file_path, 'r', encoding='latin-1') as f:
-                        book_text = f.read()
-                except:
-                    with open(file_path, 'r', encoding='cp1252') as f:
-                        book_text = f.read()
+            # Step 1: Read book from file with robust encoding handling
+            book_text = None
+            encoding_used = None
             
-            if not book_text or len(book_text) < 100:
-                raise ValueError("File appears to be empty or too short")
+            # Try encodings in order of preference
+            encodings_to_try = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
+            
+            for encoding in encodings_to_try:
+                try:
+                    print(f"🔍 DEBUG: Trying encoding: {encoding}")
+                    with open(file_path, 'r', encoding=encoding) as f:
+                        book_text = f.read()
+                    encoding_used = encoding
+                    print(f"✅ DEBUG: Successfully read file with encoding: {encoding}")
+                    break
+                except UnicodeDecodeError as e:
+                    print(f"❌ DEBUG: Failed with encoding {encoding}: {e}")
+                    continue
+                except Exception as e:
+                    print(f"❌ DEBUG: Unexpected error with encoding {encoding}: {e}")
+                    continue
+            
+            if book_text is None:
+                return f" Failed to read file with any supported encoding. Tried: {', '.join(encodings_to_try)}"
+            
+            # DEBUG: Print initial read statistics
+            print(f"🔍 DEBUG: Initial book text length: {len(book_text)} characters")
+            print(f"🔍 DEBUG: Encoding used: {encoding_used}")
+            
+            # Validate file content
+            if not book_text or len(book_text.strip()) < 1000:
+                return f" File content validation failed. Text too short: {len(book_text)} characters (minimum 1000 required)."
+            
+            # Count lines for additional validation
+            line_count = len(book_text.splitlines())
+            print(f"🔍 DEBUG: Line count: {line_count}")
+            if line_count < 100:
+                return f" File content validation failed. Too few lines: {line_count} (minimum 100 required)."
             
             # Step 2: Clean the text
             cleaned_text = self._clean_gutenberg_text(book_text)
@@ -346,11 +637,25 @@ class OrganizingAgent:
                 f.write(cleaned_text)
             print(f"Saved full cleaned text to {text_path}")
             
+            # Step 2.6: Create sentence and paragraph indexes for positional lookups
+            self._create_sentence_index(cleaned_text, book_folder)
+            self._create_paragraph_index(cleaned_text, book_folder)
+            
             # Step 3: Chunk the text
-            chunks = self.chunk_text(cleaned_text)
+            print(f"🔍 DEBUG: Starting text chunking process...")
+            try:
+                chunks = self.chunk_text(cleaned_text)
+            except Exception as e:
+                error_msg = f"Text chunking failed: {str(e)}"
+                print(f"❌ DEBUG: {error_msg}")
+                return f" {error_msg}"
             
             if not chunks:
-                raise ValueError("No text chunks were created from the book")
+                error_msg = "No valid text content found—check encoding or input file format. Chunking produced 0 chunks."
+                print(f"❌ DEBUG: {error_msg}")
+                return f" {error_msg}"
+            
+            print(f"✅ DEBUG: Successfully created {len(chunks)} chunks")
             
             # Step 4: Create documents for LangChain
             documents = [Document(page_content=chunk) for chunk in chunks]
@@ -374,8 +679,15 @@ class OrganizingAgent:
             
             # Step 6: Save to disk
             print(f"Saving index to {book_folder}")
-            vectorstore = FAISS.from_embeddings(all_vectors, documents)
-            vectorstore.save_local(book_folder)
+            try:
+                # Create embeddings list with proper format for FAISS
+                embedding_pairs = list(zip(texts, all_vectors))
+                vectorstore = FAISS.from_embeddings(embedding_pairs, embeddings)
+                vectorstore.save_local(book_folder)
+                print("Index saved successfully.")
+            except Exception as e:
+                print(f"❌ Failed to save FAISS index: {e}")
+                raise
             
             return f" Successfully added '{book_title}' from local file! You can now ask questions about it."
             
